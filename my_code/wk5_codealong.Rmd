@@ -1,0 +1,246 @@
+---
+title: "lab5_codealong"
+author: "Genevieve Chiong"
+date: "2/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(broom)
+
+# Time series packages
+library(tsibble)
+library(feasts)
+library(fable)
+
+# Spatial data packages
+library(sf)
+library(tmap)
+```
+
+# Part 1: Time series exploration and forecasting 
+```{r}
+energy <- read_csv(here("data", "energy.csv"))
+```
+
+```{r}
+energy_ts <- energy %>% 
+  mutate(date = tsibble::yearmonth(month)) %>% 
+  as_tsibble(key = NULL, index = date)
+```
+
+## Raw data graph
+```{r}
+ggplot(data = energy_ts, aes(x = date, y = res_total)) +
+  geom_line() + 
+  labs(y = "Residential energy consumption \n (Trillion BTU)")
+```
+
+## Seasonplot 
+```{r}
+energy_ts %>% 
+  gg_season(y = res_total) +
+  theme_minimal() +
+  labs(x = "month",
+       y = "residential energy consumption (trillion BTU)")
+```
+
+- The highest residential energy usage is around December / January / February
+- There is a secondary peak around July & August (that’s the repeated secondary peak we see in the original time series graph)
+- We can also see that the prevalence of that second peak has been increasing over the course of the time series: in 1973 (orange) there was hardly any summer peak. In more recent years (blue/magenta) that peak is much more prominent.
+
+## Subseries plot 
+
+```{r}
+energy_ts %>% gg_subseries(res_total)
+```
+
+- Our takeaway here is similar: there is clear seasonality (higher values in winter months), with an increasingly evident second peak in June/July/August. This reinforces our takeaways from the raw data and seasonplots.
+
+## Decomposition 
+
+```{r}
+# Find STL decomposition
+dcmp <- energy_ts %>% 
+  model(STL(res_total ~ season()))
+
+# View the components
+components (dcmp)
+
+# Visualize the decomposed components
+components(dcmp) %>% autoplot() + 
+  theme_minimal() 
+
+```
+
+## Autocorrelation function (ACF) 
+
+```{r}
+energy_ts %>% 
+  ACF(res_total) %>% 
+  autoplot() 
+```
+
+- We see that observations separated by 12 months are the most highly correlated, reflecting strong seasonality we see in all of our other exploratory visualizations.
+
+## Holt-Winters exponential smoothing 
+
+```{r}
+# Create the model: 
+energy_fit <- energy_ts %>% 
+  model(
+    ets = ETS(res_total ~ season("M"))
+  )
+
+# Forecast using the model 10 years into the future: 
+energy_forecast <- energy_fit %>% 
+  forecast(h = "10 years")
+
+# Plot just the forecasted values (with 80% and 95% CIs): 
+energy_forecast %>% 
+  autoplot() 
+```
+
+```{r}
+# Or plot it added to the original data: 
+
+energy_forecast %>% 
+  autoplot(energy_ts)
+```
+
+## Assessing residuals 
+
+```{r}
+# Append the predicted values (and residuals) to original energy data 
+energy_predicted <- broom::augment(energy_fit)
+
+# Use View(energy_predicted) to see the resulting data frame
+```
+
+```{r}
+# Plot the actual energy values (res_total), and the predicted values (stored as .fitted) atop them
+ggplot(data = energy_predicted) + 
+  geom_line(aes(x = date, y = res_total)) + 
+  geom_line(aes(x = date, y = .fitted), color = "red")
+```
+
+Residuals should be uncorrelated, centered at 0, and ideally normally distributed. 
+
+```{r}
+ggplot(data = energy_predicted, 
+       aes(x = .resid)) + 
+  geom_histogram()
+```
+
+
+# Part 2: Spatial data wrangling, visualization, and a variogram 
+
+A. California county outlines (polygons) 
+
+```{r}
+# Read in the CA county shapefile 
+
+ca_counties <- read_sf(here("data","ca_counties","CA_Counties_TIGER2016.shp"))
+
+ca_subset <- ca_counties %>% 
+  select(NAME, ALAND) %>% 
+  rename(county_name = NAME, land_area = ALAND)
+
+# Check and set the CRS 
+
+ca_subset %>% st_crs() 
+```
+
+```{r}
+# Plot the California counties using geom_sf()
+
+ggplot(data = ca_subset) + 
+  geom_sf(aes(fill = land_area),
+          color = "white", 
+          size = 0.1) +
+  theme_void() + 
+  scale_fill_gradientn(colors = c("cyan", "blue", "purple"))
+```
+
+B. Invasive red sesbania records (spatial points) 
+
+```{r}
+# Read in the data 
+sesbania <- read_sf(here("data", "red_sesbania", "ds80.shp"))
+
+# Check the CRS: 
+sesbania %>% st_crs()
+```
+
+```{r}
+# Update the CRS so it matches the CA counties CRS using st_transform()
+sesbania <- st_transform(sesbania, 3857)
+
+# Then check it: 
+sesbania %>% st_crs()
+```
+
+```{r}
+# Plot them together! 
+  
+ggplot() + 
+  geom_sf(data = ca_subset) +
+  geom_sf(data = sesbania, size = 1, color = "red")
+```
+
+```{r}
+# Find the count of red sesbania observed locations in this dataset by county 
+
+# Spatial joins 
+ca_sesbania <- ca_subset %>% 
+  st_join(sesbania) 
+
+sesbania_counts <- ca_sesbania %>% 
+  count(county_name)
+```
+
+```{r}
+# Chloropleth using the number of records for red sesbania as the fill color 
+
+ggplot(data = sesbania_counts) + 
+  geom_sf(aes(fill = n), color = "white", size = 0.1) +
+  scale_fill_gradientn(colors = c("lightgray", "orange", "red")) +
+  theme_minimal() +
+  labs(fill = "Number of S. punicea records")
+```
+
+```{r}
+# Suset of sesbania point locations only in Solano County
+solano_sesbania <- sesbania %>% 
+  filter(COUNTY == "Solano") 
+
+# Onlykeep Solano polygon from California County data 
+solano <- ca_subset %>% 
+  filter(county_name == "Solano")
+
+ggplot()+
+  geom_sf(data = solano) +
+  geom_sf(data = solano_sesbania)
+```
+
+C. Making an interactive map with {tmap}
+
+```{r}
+# Set the viewing mode to "interactive": 
+tmap_mode(mode = "view")
+
+# Then make a map (with the polygon fill color updated by variable 'land_area', updating the color palette to "BuGn"), then add another shape layer for the sesbania records (added as dots): 
+
+tm_shape(ca_subset) + 
+  tm_fill("land_area", palette = "BuGn") +
+  tm_shape(sesbania) + 
+  tm_dots()
+```
+
+
+
+
